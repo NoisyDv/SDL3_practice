@@ -1,0 +1,28 @@
+[
+  {
+    "arguments": [
+      "/usr/bin/gcc",
+      "-c",
+      "-Iheader",
+      "-o",
+      "out/game.exe",
+      "src/main.c"
+    ],
+    "directory": "/home/Tonnam/SDL3_practice",
+    "file": "/home/Tonnam/SDL3_practice/src/main.c",
+    "output": "/home/Tonnam/SDL3_practice/out/game.exe"
+  },
+  {
+    "arguments": [
+      "/usr/bin/gcc",
+      "-c",
+      "-Iheader",
+      "-o",
+      "out/game.exe",
+      "src/player.c"
+    ],
+    "directory": "/home/Tonnam/SDL3_practice",
+    "file": "/home/Tonnam/SDL3_practice/src/player.c",
+    "output": "/home/Tonnam/SDL3_practice/out/game.exe"
+  }
+]

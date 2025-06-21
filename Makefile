@@ -1,7 +1,7 @@
 CC=gcc
 CFLAGS=-Iheader
 LDFLAGS=-lSDL3 -lSDL3_image
-TARGET=out/game.exe
+TARGET=out/game
 SRC=$(wildcard src/*.c)
 
 $(TARGET):$(SRC)
