@@ -35,6 +35,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
   SDL_Log("This program render with %s", SDL_GetRendererName(renderer));
 
   load_player(renderer);
+  init_obstruc();
 
   return SDL_APP_CONTINUE;
 }
@@ -53,6 +54,8 @@ void SDL_AppQuit(void *appstate, SDL_AppResult result) {
   // delete window and renderer from memory
   SDL_DestroyWindow(window);
   SDL_DestroyRenderer(renderer);
+  destroy_player();
+  destroy_obstruc();
 }
 
 // Game loop function
@@ -62,8 +65,8 @@ SDL_AppResult SDL_AppIterate(void *appstate) {
   SDL_RenderClear(renderer);
 
   movement();
-  draw_player(renderer, 255, 0, 0);
   add_obstruc(renderer);
+  draw_player(renderer, 255, 0, 0);
 
   SDL_RenderPresent(renderer);
 

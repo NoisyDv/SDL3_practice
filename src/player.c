@@ -112,3 +112,6 @@ bool coliderrect(SDL_FRect rect1, SDL_FRect rect2) {
   }
   return false;
 }
+
+// free Texture Plyaer
+void destroy_player() { SDL_DestroyTexture(player); }
