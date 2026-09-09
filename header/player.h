@@ -15,6 +15,13 @@ typedef struct {
   float portalCool;   // portal teleport cooldown
   int gravityDir;     // 1 = down, -1 = up (gravity flip puzzle)
   bool jumpHeld;
+  // Duck + dodge-dash
+  bool ducking;       // hold S/Down: short hitbox, slow, dodges high shots
+  float dashT;        // >0 = currently dashing
+  float dashCD;       // cooldown left
+  float invulnT;      // i-frames left (dash / post-stomp grace)
+  float dashDir;      // -1 / +1 dash direction
+  bool dashHeld;      // edge-trigger for dash key
 } Player;
 
 extern Player player;

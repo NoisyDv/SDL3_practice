@@ -1,0 +1,7 @@
+# Build artifacts
+out/
+third_party/src/
+third_party/build-sdl
+third_party/build-image
+# Vendored static SDL (third_party/sdl-static) IS tracked on purpose:
+# it makes static-link builds reproducible without network.

@@ -1,6 +1,8 @@
+#include "audio.h"
 #include "player.h"
 #include "level.h"
 #include "main.h"
+#include "particles.h"
 #include <SDL3/SDL.h>
 #include <SDL3_image/SDL_image.h>
 
@@ -20,8 +22,14 @@ static SDL_FRect srcwalk[6] = {{32, 32, 32, 32},
 Player player = {0};
 static SDL_Texture *tex = NULL;
 static int idle_frame = 0, walk_frame = 0;
-static int idle_count = 0, walk_count = 0;
+static float idleT = 0, walkT = 0;
 static bool moving = false;
+static float squashT = 0; // >0 = landing squash pulse
+
+// Time-based animation: same speed on 60/144/240Hz.
+// Bigger number = slower. Tune here.
+#define IDLE_FRAME_TIME 0.15f // ~6.6 fps idle
+#define WALK_FRAME_TIME 0.09f // ~11 fps walk
 
 void load_player(SDL_Renderer *renderer) {
   tex = IMG_LoadTexture(renderer, "asset/stick.png");
@@ -39,7 +47,7 @@ void reset_player(float sx, float sy) {
   player.vx = 0;
   player.vy = 0;
   player.w = 36;
-  player.h = 56;
+  player.h = STAND_H;
   player.onGround = false;
   player.flip = false;
   player.hasKey = false;
@@ -49,6 +57,17 @@ void reset_player(float sx, float sy) {
   player.portalCool = 0;
   player.gravityDir = 1;
   player.jumpHeld = false;
+  player.ducking = false;
+  player.dashT = 0;
+  player.dashCD = 0;
+  player.invulnT = 0;
+  player.dashDir = 1;
+  player.dashHeld = false;
+  idle_frame = 0;
+  walk_frame = 0;
+  idleT = 0;
+  walkT = 0;
+  squashT = 0;
   moving = false;
 }
 
@@ -107,7 +126,73 @@ void update_player(float dt) {
   else if (dir > 0)
     player.flip = false;
 
-  player.vx = dir * MOVE_SPEED;
+  // ---- duck: hold S/Down -> short hitbox, slow, dodges high shots ----
+  bool duckKey = k[SDL_SCANCODE_S] || k[SDL_SCANCODE_DOWN];
+  if (duckKey && !player.ducking) {
+    player.ducking = true;
+    player.y += player.h - DUCK_H;
+    player.h = DUCK_H;
+  } else if (!duckKey && player.ducking) {
+    // try to stand: blocked by a ceiling? stay ducked
+    float newY = player.y - (STAND_H - DUCK_H);
+    SDL_FRect stand = {player.x, newY, player.w, STAND_H};
+    bool blocked = false;
+    SDL_FRect *ss = level_solids();
+    for (int i = 0; i < level_num_solids() && !blocked; i++)
+      if (coliderrect(stand, ss[i]))
+        blocked = true;
+    int nm0 = 0;
+    Mover *mv0 = level_movers(&nm0);
+    for (int i = 0; i < nm0 && !blocked; i++)
+      if (coliderrect(stand, mv0[i].rect))
+        blocked = true;
+    if (!blocked) {
+      player.y = newY;
+      player.h = STAND_H;
+      player.ducking = false;
+    }
+  }
+
+  // ---- dodge-dash: Shift/L edge-trigger, burst + i-frames ----
+  bool dashKey = k[SDL_SCANCODE_LSHIFT] || k[SDL_SCANCODE_RSHIFT] ||
+                 k[SDL_SCANCODE_L];
+  bool dashPressed = dashKey && !player.dashHeld;
+  player.dashHeld = dashKey;
+  if (dashPressed && player.dashCD <= 0 && player.dashT <= 0) {
+    player.dashDir = (dir != 0) ? dir : (player.flip ? -1.0f : 1.0f);
+    player.dashT = DASH_TIME;
+    player.dashCD = DASH_COOLDOWN;
+    if (player.invulnT < DASH_INVULN)
+      player.invulnT = DASH_INVULN;
+    player.vy = 0;
+    particles_burst(player.x + player.w / 2, player.y + player.h / 2, 10, 200,
+                    120, 120, 220, 255, 0.35f);
+    audio_dash();
+  }
+
+  float spd = MOVE_SPEED * (player.ducking ? DUCK_SPEED_MULT : 1.0f);
+  if (player.dashT > 0)
+    player.vx = player.dashDir * DASH_SPEED;
+  else
+    player.vx = dir * spd;
+
+  // ---- time-based sprite animation (dt, not frame count) ----
+  if (moving) {
+    walkT += dt;
+    if (walkT >= WALK_FRAME_TIME) {
+      walkT -= WALK_FRAME_TIME;
+      walk_frame = (walk_frame + 1) % 6;
+    }
+    idleT = 0; // reset so idle resumes cleanly when stopping
+  } else {
+    idleT += dt;
+    if (idleT >= IDLE_FRAME_TIME) {
+      idleT -= IDLE_FRAME_TIME;
+      idle_frame = (idle_frame + 1) % 5;
+    }
+    walkT = 0;
+    walk_frame = 0; // restart walk cycle on next move for consistency
+  }
 
   bool jumpDown = k[SDL_SCANCODE_SPACE] || k[SDL_SCANCODE_W] ||
                   k[SDL_SCANCODE_UP] || k[SDL_SCANCODE_K];
@@ -121,20 +206,42 @@ void update_player(float dt) {
     player.coyote -= dt;
   if (player.portalCool > 0)
     player.portalCool -= dt;
+  if (player.dashCD > 0)
+    player.dashCD -= dt;
+  if (player.invulnT > 0)
+    player.invulnT -= dt;
+  bool dashing = player.dashT > 0;
+  if (player.dashT > 0) {
+    player.dashT -= dt;
+    // afterimage trail
+    particles_burst(player.x + player.w / 2, player.y + player.h / 2, 2, 60,
+                    40, 120, 200, 255, 0.3f);
+  }
 
-  // gravity
-  player.vy += GRAVITY * player.gravityDir * dt;
-  if (player.vy > MAX_FALL)
-    player.vy = MAX_FALL;
-  if (player.vy < -MAX_FALL)
-    player.vy = -MAX_FALL;
+  // gravity (skipped while dashing: dash hovers)
+  if (!dashing) {
+    player.vy += GRAVITY * player.gravityDir * dt;
+    if (player.ducking && !player.onGround)
+      player.vy += GRAVITY * player.gravityDir * dt; // fast-fall while ducking
+    if (player.vy > MAX_FALL)
+      player.vy = MAX_FALL;
+    if (player.vy < -MAX_FALL)
+      player.vy = -MAX_FALL;
+  } else {
+    player.vy = 0;
+  }
 
-  // jump (normal or flipped)
+  // jump (normal or flipped); weaker from a duck
   if (player.buffer > 0 && (player.onGround || player.coyote > 0)) {
-    player.vy = (player.gravityDir == 1) ? JUMP_VEL : -JUMP_VEL;
+    float jv = JUMP_VEL * (player.ducking ? DUCK_JUMP_MULT : 1.0f);
+    player.vy = (player.gravityDir == 1) ? jv : -jv;
     player.onGround = false;
     player.coyote = 0;
     player.buffer = 0;
+    // jump dust at feet
+    particles_burst(player.x + player.w / 2, player.y + player.h - 4, 8, 160,
+                    220, 200, 200, 210, 0.4f);
+    audio_jump();
   }
   // variable jump height: release space early -> cut velocity
   if (!jumpDown) {
@@ -216,6 +323,7 @@ void update_player(float dt) {
   // ---- Y axis ----
   float prevBottom = pr.y + pr.h;
   float prevTop = pr.y;
+  float fallVy = player.vy; // speed at impact, for landing dust/shake
   player.y += player.vy * dt;
   pr = player_rect();
 
@@ -318,9 +426,96 @@ void update_player(float dt) {
     }
   }
 
+  if (squashT > 0)
+    squashT -= dt;
+
+  // ---- enemies: stomp from above kills, side touch hurts ----
+  {
+    int nen = 0;
+    Enemy *ens = level_enemies(&nen);
+    for (int i = 0; i < nen; i++) {
+      if (!ens[i].alive || player.dead)
+        continue;
+      SDL_FRect e = ens[i].rect;
+      SDL_FRect es = {e.x + 4, e.y + 4, e.w - 8, e.h - 4}; // forgiving
+      if (!coliderrect(pr, es))
+        continue;
+      bool stomp = false;
+      if (player.gravityDir == 1 && fallVy > 60 && prevBottom <= e.y + 16)
+        stomp = true;
+      if (player.gravityDir == -1 && fallVy < -60 &&
+          prevTop >= e.y + e.h - 16)
+        stomp = true;
+      if (stomp) {
+        level_kill_enemy(i);
+        player.vy = (player.gravityDir == 1 ? JUMP_VEL : -JUMP_VEL) *
+                    STOMP_BOUNCE_MULT;
+        landed = false;
+        player.onGround = false;
+        if (player.invulnT < 0.15f)
+          player.invulnT = 0.15f;
+        squashT = 0.1f;
+        particles_burst(e.x + e.w / 2, e.y + e.h / 2, 16, 260, 280, 255, 120,
+                        80, 0.5f);
+        shake_add(4.0f, 0.12f);
+        audio_stomp();
+        pr = player_rect();
+      } else if (player.invulnT > 0 || player.dashT > 0) {
+        // i-frames: dash straight through unharmed
+      } else {
+        player.dead = true;
+        particles_burst(pr.x + pr.w / 2, pr.y + pr.h / 2, 22, 300, 320, 220,
+                        50, 50, 0.7f);
+        shake_add(8.0f, 0.25f);
+        audio_death();
+      }
+    }
+  }
+
+  // ---- fireballs: duck under high ones, jump low ones, dash through ----
+  {
+    int nsh = 0;
+    Shot *shs = level_shots(&nsh);
+    for (int i = 0; i < nsh; i++) {
+      if (!shs[i].alive || player.dead)
+        continue;
+      SDL_FRect s = shs[i].rect;
+      s.x += 3;
+      s.y += 3;
+      s.w -= 6;
+      s.h -= 6;
+      if (!coliderrect(pr, s))
+        continue;
+      if (player.invulnT > 0 || player.dashT > 0) {
+        // dashing through a fireball destroys it with a spark
+        shs[i].alive = false;
+        particles_burst(s.x + s.w / 2, s.y + s.h / 2, 8, 200, 160, 255, 200,
+                        100, 0.35f);
+        audio_stomp();
+      } else {
+        player.dead = true;
+        particles_burst(pr.x + pr.w / 2, pr.y + pr.h / 2, 22, 300, 320, 255,
+                        120, 40, 0.7f);
+        shake_add(8.0f, 0.25f);
+        audio_death();
+      }
+    }
+  }
+
   if (landed) {
     player.onGround = true;
     player.coyote = COYOTE_TIME;
+    if (!wasGround) {
+      // just landed: squash + dust, harder impact = more dust + tiny shake
+      squashT = 0.14f;
+      float impact = fallVy < 0 ? -fallVy : fallVy;
+      int n = impact > 600 ? 14 : 7;
+      particles_burst(player.x + player.w / 2, player.y + player.h - 2, n,
+                      200, 160, 190, 190, 200, 0.45f);
+      audio_land(impact > 600);
+      if (impact > 700)
+        shake_add(4.0f, 0.12f);
+    }
   } else if (wasGround) {
     // just walked off: keep small coyote
     if (player.coyote <= 0)
@@ -328,12 +523,45 @@ void update_player(float dt) {
   }
 
   // fell out of world
-  if (player.y > LEVEL_H + 80 || player.y + player.h < -200)
+  if (!player.dead && (player.y > LEVEL_H + 80 || player.y + player.h < -200)) {
     player.dead = true;
+    particles_burst(player.x + player.w / 2, LEVEL_H - 40, 16, 260, 300, 220,
+                    60, 60, 0.6f);
+    shake_add(6.0f, 0.2f);
+    audio_death();
+  }
 }
 
 void draw_player(SDL_Renderer *renderer, float camX, float camY) {
-  SDL_FRect dst = {player.x - 14 - camX, player.y - 8 - camY, 64, 64};
+  // squash & stretch: stretch in air by |vy|, squash pulse on landing
+  float sx = 1.0f, sy = 1.0f;
+  if (squashT > 0) {
+    float k = squashT / 0.14f; // 1 -> 0
+    sx = 1.0f + 0.18f * k;
+    sy = 1.0f - 0.18f * k;
+  } else if (!player.onGround) {
+    float v = player.vy < 0 ? -player.vy : player.vy;
+    float k = v / 900.0f;
+    if (k > 1)
+      k = 1;
+    sx = 1.0f - 0.10f * k;
+    sy = 1.0f + 0.14f * k;
+  }
+  if (player.ducking) {
+    // crouch pose: low and wide (also matches the short hitbox)
+    sx *= 1.15f;
+    sy *= 0.62f;
+  }
+  if (player.dashT > 0) {
+    // horizontal speed streak
+    sx = 1.3f;
+    sy = 0.8f;
+  }
+  float dw = 64 * sx, dh = 64 * sy;
+  // keep feet planted: grow/shrink around bottom-center
+  float cx = player.x + player.w / 2;
+  float feetY = player.y + player.h + 8;
+  SDL_FRect dst = {cx - dw / 2 - camX, feetY - dh - camY, dw, dh};
   if (!tex) {
     SDL_SetRenderDrawColor(renderer, 220, 40, 40, 255);
     SDL_FRect hb = {player.x - camX, player.y - camY, player.w, player.h};
@@ -342,21 +570,10 @@ void draw_player(SDL_Renderer *renderer, float camX, float camY) {
   }
   SDL_FRect *src;
   if (!moving) {
-    idle_count++;
-    if (idle_count >= 15) {
-      idle_frame = (idle_frame + 1) % 5;
-      // idle has 5 entries but only 4 unique + 1; keep %5 safe
-      idle_count = 0;
-    }
     if (idle_frame < 0 || idle_frame > 4)
       idle_frame = 0;
     src = &srcidle[idle_frame];
   } else {
-    walk_count++;
-    if (walk_count >= 8) {
-      walk_frame = (walk_frame + 1) % 6;
-      walk_count = 0;
-    }
     src = &srcwalk[walk_frame];
   }
   SDL_FlipMode fm = SDL_FLIP_NONE;
@@ -367,10 +584,55 @@ void draw_player(SDL_Renderer *renderer, float camX, float camY) {
     fm = (player.flip) ? (SDL_FlipMode)(SDL_FLIP_HORIZONTAL | SDL_FLIP_VERTICAL)
                        : SDL_FLIP_VERTICAL;
   }
+  // i-frame blink
+  if (player.invulnT > 0 && ((SDL_GetTicks() / 60) % 2 == 0))
+    SDL_SetTextureAlphaMod(tex, 90);
+  else
+    SDL_SetTextureAlphaMod(tex, 255);
+  // spirit glow: soft multi-layer aura so the black silhouette reads on dark
+  // (a white color-mod halo can't work: tint multiplies, black x tint = black)
+  // tint follows the level neon: cyan / mint / violet
+  {
+    Uint8 ar = 170, ag = 210, ab = 255;
+    int li = level_index() % 3;
+    if (li == 1) {
+      ar = 170;
+      ag = 255;
+      ab = 210;
+    } else if (li == 2) {
+      ar = 200;
+      ag = 170;
+      ab = 255;
+    }
+    SDL_BlendMode oldBM;
+    SDL_GetRenderDrawBlendMode(renderer, &oldBM);
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+    float gx = cx - camX, gy = feetY - dh / 2 - camY;
+    // large-to-small: alpha accumulates toward the sprite = soft falloff.
+    // kept faint: the tight layer hugs the silhouette, wide ones just lift
+    // the backdrop so the black sprite never sits on pure black.
+    const float sc[] = {1.5f, 1.25f, 1.08f};
+    const Uint8 al[] = {8, 16, 40};
+    for (int i = 0; i < 3; i++) {
+      SDL_SetRenderDrawColor(renderer, ar, ag, ab, al[i]);
+      SDL_FRect g = {gx - dw * sc[i] / 2.0f, gy - dh * sc[i] / 2.0f,
+                     dw * sc[i], dh * sc[i]};
+      SDL_RenderFillRect(renderer, &g);
+    }
+    SDL_SetRenderDrawBlendMode(renderer, oldBM);
+  }
   if (fm == SDL_FLIP_NONE)
     SDL_RenderTexture(renderer, tex, src, &dst);
   else
     SDL_RenderTextureRotated(renderer, tex, src, &dst, 0, NULL, fm);
+  SDL_SetTextureAlphaMod(tex, 255);
+  // dash cooldown pip above head (shows when recharging)
+  if (player.dashCD > 0 && !player.dead) {
+    float w = 30.0f * (1.0f - player.dashCD / DASH_COOLDOWN);
+    SDL_SetRenderDrawColor(renderer, 120, 200, 255, 255);
+    SDL_FRect pip = {cx - 15 - camX, feetY - dh - 12 - camY, w, 3};
+    SDL_RenderFillRect(renderer, &pip);
+  }
 }
 
 void destroy_player(void) {
